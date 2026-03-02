@@ -1,0 +1,44 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Distribution / build
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# fast-alpr model cache (downloaded at runtime)
+# Uncomment line below if you want to exclude cached models from git
+# ~/.cache/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Storage (shared Docker volume content, tidak perlu di-commit)
+storage/
