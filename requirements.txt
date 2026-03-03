@@ -3,3 +3,4 @@ uvicorn>=0.30.0
 opencv-python>=4.9.0
 onnxruntime>=1.18.0
 fast-alpr>=0.1.0
+python-dotenv>=1.0.0
