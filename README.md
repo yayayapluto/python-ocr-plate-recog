@@ -1,55 +1,35 @@
-# README.md — Python OCR Service
+# LPR Service — Python OCR Microservice
 
-Microservice FastAPI untuk deteksi plat nomor kendaraan. Bagian dari stack parkieee, dijalankan sebagai
-container terpisah dan berkomunikasi dengan Go API melalui shared Docker volume dan HTTP internal network.
+FastAPI microservice for license plate recognition. Part of the parkieee stack — accepts a local file path or HTTP(S) URL, runs ALPR, and uploads the annotated image to S3-compatible storage.
 
 ---
 
 ## Stack
 
-| Komponen | Teknologi |
+| Component | Technology |
 |---|---|
 | Framework | FastAPI + Uvicorn |
-| Deteksi plat | [fast-alpr](https://github.com/ankandrew/fast-alpr) (YOLO + CCT ONNX) |
+| Plate detection | [fast-alpr](https://github.com/ankandrew/fast-alpr) (YOLO + CCT ONNX) |
 | Image processing | OpenCV |
+| HTTP client | httpx |
 | Runtime | Python 3.11 |
 | Containerization | Docker |
 
 ---
 
-## Cara Kerja
+## How It Works
 
 ```
-Go API
+Go API / Client
   │
-  ├─ 1. Simpan foto ke ./storage/photos/ (shared volume)
-  ├─ 2. POST /detect-plate {"image_path": "/mnt/storage/photos/entry_xxx.jpeg"}
+  ├─ POST /detect-plate {"image_path": "<local path or URL>"}
   │
   ▼
-Python OCR
-  ├─ 3. Baca file dari path (shared volume yang sama)
-  ├─ 4. Jalankan ALPR: deteksi plat + OCR
-  ├─ 5. Simpan gambar anotasi: entry_xxx_output.jpeg
-  └─ 6. Return: detected_plate, confidence, output_image_path
-```
-
----
-
-## Struktur Folder
-
-```
-Python-OCR/
-├── app/
-│   ├── main.py              # FastAPI app, health endpoint
-│   ├── routes/
-│   │   └── plate.py         # POST /detect-plate
-│   └── services/
-│       └── ocr.py           # ALPR model & detection logic
-├── Dockerfile
-├── requirements.txt
-├── run.py                   # Entry point dev lokal
-├── AGENTS.md                # Panduan untuk AI coding agents
-└── README.md
+LPR Service
+  ├─ Load image (local path or HTTP(S) URL)
+  ├─ Run ALPR: plate detection + OCR
+  ├─ Encode annotated image → upload to S3
+  └─ Return: detected_plate, confidence, output_image_path (public S3 URL)
 ```
 
 ---
@@ -57,7 +37,6 @@ Python-OCR/
 ## Endpoints
 
 ### `GET /health`
-Cek status service. Dipanggil oleh Docker healthcheck dan Go API sebelum dispatch OCR job.
 
 ```json
 { "status": "ok" }
@@ -67,8 +46,6 @@ Cek status service. Dipanggil oleh Docker healthcheck dan Go API sebelum dispatc
 
 ### `POST /detect-plate`
 
-Deteksi plat nomor dari file gambar di shared volume.
-
 **Request:**
 ```json
 {
@@ -76,94 +53,83 @@ Deteksi plat nomor dari file gambar di shared volume.
 }
 ```
 
+`image_path` accepts either a local file path **or** a URL (`http://` / `https://`).
+
 **Response 200:**
 ```json
 {
   "detected_plate": "B1701SGI",
   "confidence": 0.9831,
-  "output_image_path": "/mnt/storage/photos/entry_d6c2441a_output.jpeg"
+  "output_image_path": "https://<s3-public-base>/entry_d6c2441a_output.jpg"
 }
 ```
 
+`output_image_path` is the public S3 URL of the annotated image. Returns `""` if the upload fails — the plate result is still returned.
+
 **Error responses:**
 
-| Status | Kondisi |
+| Status | Condition |
 |---|---|
-| `404` | File tidak ditemukan di path yang diberikan |
-| `422` | File valid tapi tidak ada plat terdeteksi |
-| `500` | Error internal |
+| `404` | File or URL not found |
+| `422` | Valid image but no plate detected |
+| `500` | Internal error |
 
 ---
 
-## Menjalankan dengan Docker (Rekomendasi)
+## Configuration
 
-Service ini dijalankan otomatis lewat `docker-compose.yml` di `Go-Api/`.
+Create a `.env` file in the project root (auto-loaded by `run.py`):
 
-```bash
-cd Go-Api
-
-# Pertama kali / setelah ada perubahan kode:
-docker compose up --build python-ocr -d
-
-# Lihat log:
-docker logs parkieee_python_ocr -f
+```env
+S3_ENDPOINT=https://...
+S3_BUCKET=bucket-name
+S3_ACCESS_KEY=...
+S3_SECRET_KEY=...
+S3_REGION=us-east-1
+S3_PUBLIC_BASE_URL=https://...
 ```
 
-> **Catatan:** Gunakan `--build` setiap kali ada perubahan kode Python.
-> `docker compose restart` saja **tidak** mengapply perubahan.
+All six variables are required. The service raises an error at upload time if any are missing.
+
+> S3 uploads use hand-rolled AWS Signature V4 (no boto3) for compatibility with Ceph-based providers such as NevaObjects.
 
 ---
 
-## Menjalankan Lokal (Development)
+## Running Locally
 
 ```bash
-# 1. Buat virtual environment
-python -m venv .venv
+python -m venv venv
 
 # Windows
-.venv\Scripts\activate
+venv\Scripts\activate
 # Linux/macOS
-source .venv/bin/activate
+source venv/bin/activate
 
-# 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Jalankan server (auto-reload aktif)
 python run.py
+# → http://localhost:8000
+# → Interactive docs: http://localhost:8000/docs
 ```
 
-Server berjalan di `http://localhost:8000`.
-Dokumentasi interaktif: `http://localhost:8000/docs`
+---
+
+## Running with Docker
+
+```bash
+docker build -t lpr-service .
+docker run -p 8000:8000 --env-file .env lpr-service
+```
 
 ---
 
-## Shared Volume
-
-Go API dan Python OCR berbagi satu bind mount ke folder `./Go-Api/storage/`:
-
-| Container | Mount path di container |
-|---|---|
-| `parkieee_api` (Go) | `/mnt/storage` |
-| `parkieee_python_ocr` (Python) | `/mnt/storage` |
-
-Go API menulis foto ke `/mnt/storage/photos/` → Python baca dari path yang sama →
-Python tulis `_output` di path yang sama → Go API bisa serve via `/storage/photos/`.
-
----
-
-## Model ALPR
+## ALPR Models
 
 | Parameter | Value |
 |---|---|
 | Detector | `yolo-v9-t-384-license-plate-end2end` |
 | OCR | `cct-xs-v1-global-model` |
 
-Model di-download otomatis oleh `fast-alpr` pada saat pertama kali dijalankan.
+Models are downloaded automatically by `fast-alpr` on first run.
 
-### Catatan image format
-`fast-alpr` menggunakan konvensi **RGB**, sementara OpenCV (`cv2`) menggunakan **BGR**.
-Service ini menangani konversi secara otomatis:
-
-```
-cv2.imread → BGR → [cvtColor BGR2RGB] → fast-alpr → RGB → [cvtColor RGB2BGR] → cv2.imwrite
-```
+`fast-alpr` expects **RGB** input; OpenCV uses **BGR** — the service handles conversion automatically.

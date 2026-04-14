@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import os
-import urllib.request
+import httpx
 from datetime import datetime, timezone
 
 
@@ -24,15 +24,8 @@ def _hmac_hex(key: bytes, msg: str) -> str:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def upload_to_s3(data: bytes, filename: str, content_type: str = "image/jpeg") -> str:
-    """
-    Upload bytes to S3-compatible storage using raw AWS Signature V4.
-    Uses the same signing approach as the Go implementation to stay compatible
-    with Ceph-based providers (NevaObjects) that reject SDK-added headers.
-
-    Returns the public URL of the uploaded object.
-    Raises RuntimeError if S3 config is missing or upload fails.
-    """
+def _build_request(data: bytes, filename: str, content_type: str) -> tuple[str, dict, str]:
+    """Build the signed PUT request for S3. Returns (url, headers, public_url)."""
     endpoint = os.environ.get("S3_ENDPOINT", "").rstrip("/")
     bucket = os.environ.get("S3_BUCKET", "")
     access_key = os.environ.get("S3_ACCESS_KEY", "")
@@ -47,7 +40,6 @@ def upload_to_s3(data: bytes, filename: str, content_type: str = "image/jpeg") -
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
     date_stamp = now.strftime("%Y%m%d")
 
-    # Strip scheme manually to stay compatible across Python versions.
     host = endpoint
     for prefix in ("https://", "http://"):
         if host.startswith(prefix):
@@ -94,20 +86,38 @@ def upload_to_s3(data: bytes, filename: str, content_type: str = "image/jpeg") -
         f"Signature={signature}"
     )
 
-    req = urllib.request.Request(url, data=data, method="PUT")
-    req.add_header("Content-Type", content_type)
-    req.add_header("x-amz-date", amz_date)
-    req.add_header("x-amz-content-sha256", payload_hash)
-    req.add_header("Authorization", auth_header)
-    req.add_header("Content-Length", str(len(data)))
-    req.add_header("User-Agent", "Mozilla/5.0")
+    headers = {
+        "Content-Type": content_type,
+        "x-amz-date": amz_date,
+        "x-amz-content-sha256": payload_hash,
+        "Authorization": auth_header,
+        "Content-Length": str(len(data)),
+        "User-Agent": "Mozilla/5.0",
+    }
 
-    try:
-        with urllib.request.urlopen(req) as resp:
-            if resp.status not in (200, 201):
-                raise RuntimeError(f"S3 upload returned status {resp.status}")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"S3 upload failed ({e.code}): {body}") from e
+    return url, headers, f"{public_base}/{filename}"
 
-    return f"{public_base}/{filename}"
+
+async def upload_to_s3_async(data: bytes, filename: str, content_type: str = "image/jpeg") -> str:
+    """
+    Upload bytes to S3-compatible storage using raw AWS Signature V4.
+    Uses manual signing to stay compatible with Ceph-based providers (NevaObjects)
+    that reject SDK-added headers.
+
+    Retries once on transient failure. Returns the public URL.
+    Raises RuntimeError if config is missing or both attempts fail.
+    """
+    url, headers, public_url = _build_request(data, filename, content_type)
+
+    last_err: Exception = RuntimeError("Upload did not attempt")
+    async with httpx.AsyncClient() as client:
+        for _ in range(2):
+            try:
+                resp = await client.put(url, content=data, headers=headers)
+                if resp.status_code in (200, 201):
+                    return public_url
+                last_err = RuntimeError(f"S3 upload failed ({resp.status_code}): {resp.text}")
+            except httpx.RequestError as e:
+                last_err = RuntimeError(f"S3 upload request error: {e}")
+
+    raise last_err
