@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException
+import logging
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional
@@ -6,6 +8,11 @@ from app.services.ocr import run_inference
 from app.services.s3 import upload_to_s3_async
 
 router = APIRouter(prefix="/detect-plate", tags=["Plate Detection"])
+logger = logging.getLogger(__name__)
+
+
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    return request.app.state.http_client
 
 
 class DetectPlateRequest(BaseModel):
@@ -24,7 +31,10 @@ class DetectPlateResponse(BaseModel):
     summary="Detect license plate from image",
     description="Accepts an image path or HTTP(S) URL. Returns the detected plate number, confidence score, and path to the annotated output image.",
 )
-async def detect_plate_endpoint(body: DetectPlateRequest):
+async def detect_plate_endpoint(
+    body: DetectPlateRequest,
+    client: httpx.AsyncClient = Depends(get_http_client),
+):
     try:
         result = await run_in_threadpool(run_inference, body.image_path)
     except FileNotFoundError:
@@ -40,10 +50,10 @@ async def detect_plate_endpoint(body: DetectPlateRequest):
             output_image_path = await upload_to_s3_async(
                 result["annotated_bytes"],
                 f"{result['stem']}_output.jpg",
-                "image/jpeg",
+                client,
             )
         except Exception as e:
-            print(f"[S3] warning: failed to upload annotated image: {e}")
+            logger.warning("Failed to upload annotated image to S3: %s", e)
 
     return DetectPlateResponse(
         detected_plate=result["detected_plate"],
