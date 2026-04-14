@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 opencv-python
+onnxruntime
 fast-alpr
 python-dotenv
 httpx
